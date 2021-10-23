@@ -1,0 +1,243 @@
+package org.twostack.bitcoin4j.Trans;
+
+import com.google.common.math.LongMath;
+import org.twostack.bitcoin4j.Sha256Hash;
+import org.twostack.bitcoin4j.Utils;
+import org.twostack.bitcoin4j.VarInt;
+import org.twostack.bitcoin4j.exception.VerificationException;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.util.*;
+
+public class Trans {
+
+    private long version = 1;
+    private long nLockTime = 0;
+    private ArrayList<TransInput> inputs = new ArrayList<>();
+    private ArrayList<TransOutput> outputs = new ArrayList<>();
+
+    /// Max value for an unsigned 32 bit value
+    public static final long NLOCKTIME_MAX_VALUE = 4294967295L;
+
+    public static final long MAX_COINS = 21000000;
+    /// max amount of bitcoins in circulation
+
+    private static final int SMALLEST_UNIT_EXPONENT = 8;
+    private static final long COIN_VALUE = LongMath.pow(10, SMALLEST_UNIT_EXPONENT);
+
+    public static final long MAX_MONEY = LongMath.checkedMultiply(COIN_VALUE, MAX_COINS);
+
+   
+    public static final int LOCKTIME_THRESHOLD = 500000000; // Tue Nov  5 00:53:20 1985 UTC
+
+
+    public static final BigInteger LOCKTIME_THRESHOLD_BIG = BigInteger.valueOf(LOCKTIME_THRESHOLD);
+
+ 
+    public static final int MAX_STANDARD_TX_SIZE = 100000;
+
+    public Trans(){
+
+    }
+
+    public Trans(ByteBuffer buffer){
+
+        parseBuffer(buffer);
+    }
+
+    /// Constructs a  Trans instance from the raw hexadecimal string.
+    public static Trans fromHex(String txnHex) {
+
+        byte[] bytes = Utils.HEX.decode(txnHex);
+        byte[] hash = Sha256Hash.hashTwice(Utils.HEX.decode(txnHex));
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+
+        return new Trans(buffer);
+    }
+
+    private void parseBuffer(ByteBuffer buffer){
+
+        ReadUtils reader = new ReadUtils(buffer.array());
+
+        Integer i, sizeTxIns, sizeTxOuts;
+
+        version = reader.readUint32();
+        sizeTxIns = reader.readVarInt().intValue();
+        for (i = 0; i < sizeTxIns; i++) {
+            TransInput input = TransInput.fromReader(reader);
+            inputs.add(input);
+        }
+
+        sizeTxOuts = reader.readVarInt().intValue();
+        for (i = 0; i < sizeTxOuts; i++) {
+            TransOutput output = TransOutput.fromReader(reader);
+//            output.setOutputIndex(i); //FIXME: What are implications of tracking output index elsewhere ?
+            outputs.add(output);
+        }
+
+        nLockTime = reader.readUint32();
+    }
+
+    public byte[] serialize() throws IOException {
+
+        ByteArrayOutputStream os = new ByteArrayOutputStream();
+
+        // set the Trans version
+        Utils.uint32ToByteStreamLE(version, os);
+
+        // set the number of inputs
+        VarInt varInt = new VarInt(inputs.size());
+        os.write(varInt.encode());
+
+        // write the inputs
+        inputs.forEach( (input) ->  {
+            try {
+                byte[] buf = input.serialize();
+                os.write(buf);
+
+            }catch(IOException ex){
+                System.out.println(ex.getMessage()); //FIXME: !!
+            }
+        });
+
+        //set the number of outputs to come
+        varInt = new VarInt(outputs.size());
+        os.write(varInt.encode());
+
+        // write the outputs
+        outputs.forEach((output) -> {
+            try {
+                os.write(output.serialize());
+            }catch(IOException ex){
+                System.out.println(ex.getMessage()); //FIXME: !!!
+            }
+        });
+
+        // write the locktime
+        Utils.uint32ToByteStreamLE(nLockTime, os);
+
+        return os.toByteArray();
+    }
+
+    public void verify() throws VerificationException {
+
+        if (inputs.size() == 0 || outputs.size() == 0)
+            throw new VerificationException.EmptyInputsOrOutputs();
+
+
+        List<String> outpoints = new ArrayList<>();
+        for (TransInput input : inputs) {
+
+            String outpointId = Utils.HEX.encode(input.getPrevTxnId()) + ":" + input.getPrevTxnOutputIndex();
+
+            if (outpoints.contains(outpointId)){
+                throw new VerificationException.DuplicatedOutPoint();
+            }
+
+            outpoints.add(outpointId);
+        }
+
+        BigInteger valueOut = BigInteger.ZERO;
+        for (TransOutput output : outputs) {
+            BigInteger value = output.getAmount();
+            if (value.signum() < 0)
+                throw new VerificationException.NegativeValueOutput();
+            try {
+                valueOut = valueOut.add(value);
+            } catch (ArithmeticException e) {
+                throw new VerificationException.ExcessiveValue();
+            }
+            if (valueOut.compareTo(BigInteger.valueOf(MAX_MONEY)) == 1)
+                throw new VerificationException.ExcessiveValue();
+        }
+
+
+        if (Tbasecoin()) {
+            int progLength = inputs.get(0).getScriptSig().getProgram().length;
+            if (progLength < 2 ||  progLength > 100)
+                throw new VerificationException.CoinbaseScriptSizeOutOfRange();
+        } else {
+            for (TransInput input : inputs)
+                if (input.Tbasecoin())
+                    throw new VerificationException.UnexpectedCoinbaseInput();
+        }
+    }
+    public boolean Tbasecoin() {
+        return inputs.size() == 1 && inputs.get(0).Tbasecoin();
+    }
+
+
+    /** Returns an unmodifiable view of all inputs. */
+    public List<TransInput> getInputs() {
+        return Collections.unmodifiableList(inputs);
+    }
+
+    public void replaceOutput(int index, TransOutput txout) {
+        outputs.set(index, txout);
+    }
+
+    public TransInput replaceInput(int index, TransInput input){
+        return inputs.set(index, input);
+    }
+
+    public void clearInputs() {
+        inputs.clear();
+    }
+
+    public void clearOutputs() {
+        outputs.clear();
+    }
+
+ 
+    public List<TransOutput> getOutputs() {
+        return Collections.unmodifiableList(outputs);
+    }
+
+    public String getTransId(){
+        byte[] idBytes = getTransIdBytes();
+        return Utils.HEX.encode(Utils.reverseBytes(idBytes));
+    }
+
+    public byte[] getTransIdBytes(){
+
+        byte[] rawTx = new byte[]{};
+        try {
+            rawTx = this.serialize();
+        }catch(IOException ex){
+
+        }
+
+        return Sha256Hash.hashTwice(rawTx);
+    }
+
+    public void addOutput(TransOutput output) {
+        outputs.add(output);
+    }
+
+    public void addInput(TransInput input) {
+        inputs.add(input);
+    }
+
+    public long getVersion() {
+        return version;
+    }
+
+    public long getLockTime() {
+        return nLockTime;
+    }
+
+    public void setLockTime(long nLockTime) {
+        this.nLockTime = nLockTime;
+    }
+
+    public void addInputs(List<TransInput> inputs) {
+        this.inputs.addAll(inputs);
+    }
+
+    public void addOutputs(List<TransOutput> outputs) {
+        this.outputs.addAll(outputs);
+    }
+}
